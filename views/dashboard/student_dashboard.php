@@ -1,86 +1,62 @@
 <?php
-// Enable error reporting for debugging (remove after it works)
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
 require_once '../../includes/config.php';
-require_once '../../includes/functions.php'; // ensure redirect_by_role() and getCareerRecommendations() are loaded
 
-// Authentication & role check
-if (!isLoggedIn()) {
-    redirect('../../login.php?timeout=1');
-}
-if ($_SESSION['role'] !== 'student') {
-    redirect_by_role($_SESSION['role']);
-}
+if (!isLoggedIn()) redirect('../../login.php');
+if ($_SESSION['role'] !== 'student') redirect_by_role($_SESSION['role']);
 
 $user_id = (int)$_SESSION['user_id'];
 $full_name = htmlspecialchars($_SESSION['full_name']);
-$first_name = htmlspecialchars(explode(' ', trim($full_name))[0]);
-$avatar_letter = strtoupper(mb_substr(trim($full_name), 0, 1));
+$first_name = explode(' ', $full_name)[0];
+$avatar_letter = strtoupper(substr($full_name, 0, 1));
+$greeting = date('H') < 12 ? 'morning' : (date('H') < 17 ? 'afternoon' : 'evening');
 
-$hour = (int)date('H');
-$greeting = $hour < 12 ? 'morning' : ($hour < 17 ? 'afternoon' : 'evening');
-
-// ─── Fetch student profile ────────────────────────────────
+// Fetch profile
 $profile = null;
-if ($conn) {
-    $stmt = mysqli_prepare($conn, "SELECT institution, course_of_study, skills, interests FROM student_profiles WHERE user_id = ?");
-    if ($stmt) {
-        mysqli_stmt_bind_param($stmt, 'i', $user_id);
-        mysqli_stmt_execute($stmt);
-        $profile = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
-        mysqli_stmt_close($stmt);
-    }
+$stmt = mysqli_prepare($conn, "SELECT institution, course_of_study, skills, interests FROM student_profiles WHERE user_id = ?");
+if ($stmt) {
+    mysqli_stmt_bind_param($stmt, 'i', $user_id);
+    mysqli_stmt_execute($stmt);
+    $profile = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
 }
 
-// ─── Profile completeness (0‑100) ─────────────────────────
 $completeness = 0;
 if ($profile) {
-    if (!empty($profile['institution']))     $completeness += 25;
+    if (!empty($profile['institution'])) $completeness += 25;
     if (!empty($profile['course_of_study'])) $completeness += 25;
-    if (!empty($profile['skills']))          $completeness += 25;
-    if (!empty($profile['interests']))       $completeness += 25;
+    if (!empty($profile['skills'])) $completeness += 25;
+    if (!empty($profile['interests'])) $completeness += 25;
 }
 
-// ─── Career recommendations ───────────────────────────────
 $recommendations = getCareerRecommendations($user_id);
-
-// ─── Total active careers ─────────────────────────────────
 $total_careers = 0;
-$career_check = mysqli_query($conn, "SELECT COUNT(*) AS c FROM career_paths WHERE is_active = 1");
-if ($career_check) {
-    $total_careers = (int)mysqli_fetch_assoc($career_check)['c'];
-}
+$career_res = mysqli_query($conn, "SELECT COUNT(*) as c FROM career_paths WHERE is_active = 1");
+if ($career_res) $total_careers = (int)mysqli_fetch_assoc($career_res)['c'];
 
-// ─── Assessments taken ────────────────────────────────────
 $assessments_taken = 0;
-$assess_check = mysqli_query($conn, "SELECT COUNT(*) AS c FROM assessment_results WHERE user_id = $user_id");
-if ($assess_check) {
-    $assessments_taken = (int)mysqli_fetch_assoc($assess_check)['c'];
-}
+$assess_res = mysqli_query($conn, "SELECT COUNT(*) as c FROM assessment_results WHERE user_id = $user_id");
+if ($assess_res) $assessments_taken = (int)mysqli_fetch_assoc($assess_res)['c'];
 
-// ─── Upcoming appointments count ──────────────────────────
+// Safe appointment queries – check if table exists and has required columns
 $appointment_count = 0;
-$app_check = mysqli_query($conn, "SELECT COUNT(*) AS c FROM appointments WHERE student_id = $user_id AND appointment_date >= CURDATE() AND status != 'cancelled'");
-if ($app_check) {
-    $appointment_count = (int)mysqli_fetch_assoc($app_check)['c'];
-}
-
-// ─── Next appointment (for banner) ────────────────────────
 $next_appointment = null;
-$next_app_query = mysqli_query($conn, "
-    SELECT a.appointment_date, a.appointment_time, a.status, u.full_name AS counselor_name
-    FROM appointments a
-    JOIN users u ON u.id = a.counselor_id
-    WHERE a.student_id = $user_id
-      AND a.appointment_date >= CURDATE()
-      AND a.status != 'cancelled'
-    ORDER BY a.appointment_date ASC, a.appointment_time ASC
-    LIMIT 1
-");
-if ($next_app_query) {
-    $next_appointment = mysqli_fetch_assoc($next_app_query);
+$table_check = mysqli_query($conn, "SHOW TABLES LIKE 'appointments'");
+if (mysqli_num_rows($table_check) > 0) {
+    // Check if column exists
+    $col_check = mysqli_query($conn, "SHOW COLUMNS FROM appointments LIKE 'appointment_date'");
+    if (mysqli_num_rows($col_check) > 0) {
+        $app_res = mysqli_query($conn, "SELECT COUNT(*) as c FROM appointments WHERE student_id = $user_id AND appointment_date >= CURDATE() AND status != 'cancelled'");
+        if ($app_res) $appointment_count = (int)mysqli_fetch_assoc($app_res)['c'];
+        
+        $next_res = mysqli_query($conn, "
+            SELECT a.appointment_date, a.appointment_time, u.full_name as counselor_name
+            FROM appointments a
+            JOIN users u ON u.id = a.counselor_id
+            WHERE a.student_id = $user_id AND a.appointment_date >= CURDATE() AND a.status != 'cancelled'
+            ORDER BY a.appointment_date, a.appointment_time LIMIT 1
+        ");
+        if ($next_res) $next_appointment = mysqli_fetch_assoc($next_res);
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -184,161 +160,63 @@ if ($next_app_query) {
     </style>
 </head>
 <body>
-
-<!-- Sidebar -->
 <aside class="sidebar">
     <div class="sidebar-brand">
-        <div class="brand-icon">
-            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-        </div>
-        <div class="brand-title">Smart Learning</div>
-        <div class="brand-sub">Career Guidance</div>
+        <div class="brand-icon"><svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+        <div class="brand-title">Smart Learning</div><div class="brand-sub">Career Guidance</div>
     </div>
     <nav class="nav-section">
         <div class="nav-label">Menu</div>
         <a href="student_dashboard.php" class="nav-item active"><span class="nav-icon">🏠</span> Dashboard</a>
-        <a href="../profile.php"        class="nav-item"><span class="nav-icon">👤</span> My Profile</a>
-        <a href="../careers.php"        class="nav-item"><span class="nav-icon">🧭</span> Browse Careers</a>
-        <a href="../assessments.php"    class="nav-item"><span class="nav-icon">📋</span> Assessments</a>
-        <a href="../appointments.php"   class="nav-item"><span class="nav-icon">📅</span> Book Counsellor</a>
-        <a href="../resources.php"      class="nav-item"><span class="nav-icon">📚</span> Resources</a>
+        <a href="../profile.php" class="nav-item"><span class="nav-icon">👤</span> My Profile</a>
+        <a href="../careers.php" class="nav-item"><span class="nav-icon">🧭</span> Browse Careers</a>
+        <a href="../assessments.php" class="nav-item"><span class="nav-icon">📋</span> Assessments</a>
+        <a href="../appointments.php" class="nav-item"><span class="nav-icon">📅</span> Book Counsellor</a>
+        <a href="../resources.php" class="nav-item"><span class="nav-icon">📚</span> Resources</a>
     </nav>
     <div class="sidebar-footer">
-        <div class="user-chip">
-            <div class="avatar"><?= $avatar_letter ?></div>
-            <div class="user-info">
-                <div class="user-name"><?= $full_name ?></div>
-                <div class="user-role">Student</div>
-            </div>
-        </div>
+        <div class="user-chip"><div class="avatar"><?= $avatar_letter ?></div><div class="user-info"><div class="user-name"><?= $full_name ?></div><div class="user-role">Student</div></div></div>
         <a href="../../logout.php" class="logout-btn">⬡ Sign out</a>
     </div>
 </aside>
-
-<!-- Main Content -->
 <main class="main">
-    <div class="page-header">
-        <h1>Good <?= $greeting ?>, <?= $first_name ?> 👋</h1>
-        <p>Here's an overview of your career guidance journey.</p>
-    </div>
-
-    <!-- Timeout notice -->
-    <?php if (isset($_GET['timeout'])): ?>
-        <div class="alert alert-warning">⚠️ Your session expired. Please sign in again.</div>
-    <?php endif; ?>
-
-    <!-- Next appointment banner -->
+    <div class="page-header"><h1>Good <?= $greeting ?>, <?= $first_name ?> 👋</h1><p>Here's an overview of your career guidance journey.</p></div>
+    <?php if (isset($_GET['timeout'])): ?><div class="alert alert-warning">⚠️ Your session expired. Please sign in again.</div><?php endif; ?>
     <?php if ($next_appointment): ?>
-        <div class="alert alert-info">
-            📅 You have an upcoming session with <strong><?= htmlspecialchars($next_appointment['counselor_name']) ?></strong>
-            on <strong><?= date('D j M Y', strtotime($next_appointment['appointment_date'])) ?></strong>
-            at <strong><?= date('g:i A', strtotime($next_appointment['appointment_time'])) ?></strong>.
-            <a href="../appointments.php" style="margin-left:8px;color:var(--accent-dark);font-weight:600;">View →</a>
-        </div>
+        <div class="alert alert-info">📅 Upcoming session with <strong><?= htmlspecialchars($next_appointment['counselor_name']) ?></strong> on <strong><?= date('D j M Y', strtotime($next_appointment['appointment_date'])) ?></strong> at <strong><?= date('g:i A', strtotime($next_appointment['appointment_time'])) ?></strong>. <a href="../appointments.php" style="margin-left:8px;color:var(--accent-dark);font-weight:600;">View →</a></div>
     <?php endif; ?>
-
-    <!-- Profile completeness banner -->
     <?php if ($completeness < 100): ?>
-        <div class="completion-banner">
-            <div class="completion-info">
-                <strong>Your profile is <?= $completeness ?>% complete</strong>
-                <p>Complete your profile to unlock more accurate career recommendations.</p>
-                <div class="completion-bar-outer"><div class="completion-bar-inner" style="width:<?= $completeness ?>%"></div></div>
-            </div>
-            <div class="completion-pct"><?= $completeness ?>%</div>
-        </div>
+        <div class="completion-banner"><div class="completion-info"><strong>Profile <?= $completeness ?>% complete</strong><p>Complete your profile for better recommendations.</p><div class="completion-bar-outer"><div class="completion-bar-inner" style="width:<?= $completeness ?>%"></div></div></div><div class="completion-pct"><?= $completeness ?>%</div></div>
     <?php else: ?>
         <div class="alert alert-success">✅ Your profile is fully complete — you're getting the best recommendations!</div>
     <?php endif; ?>
-
-    <!-- Stats row -->
     <div class="stats-row">
         <div class="stat-card"><div class="stat-icon">🧭</div><div class="stat-value"><?= $total_careers ?></div><div class="stat-label">Careers Available</div></div>
         <div class="stat-card"><div class="stat-icon">⭐</div><div class="stat-value"><?= count($recommendations) ?></div><div class="stat-label">Your Matches</div></div>
         <div class="stat-card"><div class="stat-icon">📋</div><div class="stat-value"><?= $assessments_taken ?></div><div class="stat-label">Assessments Taken</div></div>
         <div class="stat-card"><div class="stat-icon">📅</div><div class="stat-value"><?= $appointment_count ?></div><div class="stat-label">Appointments</div></div>
     </div>
-
-    <!-- Profile snapshot -->
-    <div class="section">
-        <div class="section-title">My Profile</div>
-        <div class="profile-card">
-            <div class="profile-avatar"><?= $avatar_letter ?></div>
-            <div class="profile-details">
-                <h2><?= $full_name ?></h2>
-                <div class="profile-meta">
-                    <?php if ($profile): ?>
-                        <?= htmlspecialchars($profile['course_of_study'] ?: 'Course not set') ?>
-                        <?php if (!empty($profile['institution'])): ?> — <?= htmlspecialchars($profile['institution']) ?><?php endif; ?>
-                    <?php else: ?>
-                        Profile not yet completed.
-                    <?php endif; ?>
-                </div>
-                <?php if (!empty($profile['skills'])): ?>
-                    <div class="skills-list">
-                        <?php foreach (array_slice(explode(',', $profile['skills']), 0, 5) as $skill): ?>
-                            <span class="tag"><?= htmlspecialchars(trim($skill)) ?></span>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-                <br>
-                <?php if ($completeness === 100): ?>
-                    <span class="verified-badge">✓ Profile Complete</span>
-                <?php else: ?>
-                    <span class="verified-badge pending-badge">⏳ Profile Incomplete</span>
-                <?php endif; ?>
-                <span class="badge" style="margin-left:6px;">🎓 Student</span><br>
-                <a href="../profile.php" class="btn-sm"><?= $profile ? 'Edit Profile' : 'Complete Profile' ?></a>
-                <a href="../assessments.php" class="btn-sm btn-outline">Take Assessment</a>
-            </div>
-        </div>
+    <div class="section"><div class="section-title">My Profile</div>
+        <div class="profile-card"><div class="profile-avatar"><?= $avatar_letter ?></div>
+        <div class="profile-details"><h2><?= $full_name ?></h2><div class="profile-meta"><?php if ($profile): ?><?= htmlspecialchars($profile['course_of_study'] ?: 'Course not set') ?><?php if (!empty($profile['institution'])): ?> — <?= htmlspecialchars($profile['institution']) ?><?php endif; ?><?php else: ?>Profile not yet completed.<?php endif; ?></div>
+        <?php if (!empty($profile['skills'])): ?><div class="skills-list"><?php foreach (array_slice(explode(',', $profile['skills']), 0, 5) as $skill): ?><span class="tag"><?= htmlspecialchars(trim($skill)) ?></span><?php endforeach; ?></div><?php endif; ?><br>
+        <?php if ($completeness === 100): ?><span class="verified-badge">✓ Profile Complete</span><?php else: ?><span class="verified-badge pending-badge">⏳ Profile Incomplete</span><?php endif; ?><span class="badge" style="margin-left:6px;">🎓 Student</span><br>
+        <a href="../profile.php" class="btn-sm"><?= $profile ? 'Edit Profile' : 'Complete Profile' ?></a> <a href="../assessments.php" class="btn-sm btn-outline">Take Assessment</a>
+        </div></div>
     </div>
-
-    <!-- Quick Actions -->
-    <div class="section">
-        <div class="section-title">Quick Actions</div>
-        <div class="info-grid">
-            <div class="info-card"><h4>🧭 Explore Careers</h4><p>Browse all available career paths and see how your skills and interests match up.</p><a href="../careers.php" class="btn-sm" style="margin-top:12px;">Browse Careers</a></div>
-            <div class="info-card"><h4>📅 Book a Counsellor</h4><p>Schedule a one-on-one session with a career counsellor for personalised guidance.</p><a href="../appointments.php" class="btn-sm" style="margin-top:12px;">Book Appointment</a></div>
-            <div class="info-card"><h4>📋 Take an Assessment</h4><p>Complete assessments to improve your match accuracy and discover your strengths.</p><a href="../assessments.php" class="btn-sm" style="margin-top:12px;">Start Assessment</a></div>
-        </div>
-    </div>
-
-    <!-- Career recommendations -->
-    <div class="section">
-        <div class="section-title">Career Recommendations for You</div>
-        <?php if (!empty($recommendations)): ?>
-            <div class="career-grid">
-                <?php foreach ($recommendations as $rec):
-                    $career = $rec['career'];
-                    $score  = min(100, max(0, (int)$rec['score']));
-                    $name   = htmlspecialchars($career['career_name'] ?? 'Unknown');
-                    $cat    = htmlspecialchars($career['category'] ?? '');
-                    $edu    = htmlspecialchars($career['education_required'] ?? 'Various');
-                    $id     = (int)($career['id'] ?? 0);
-                ?>
-                    <div class="career-card">
-                        <div class="career-name">🏢 <?= $name ?></div>
-                        <?php if ($cat): ?><div class="career-category"><?= $cat ?></div><?php endif; ?>
-                        <div class="career-category"><?= $edu ?></div>
-                        <div class="match-bar-wrap">
-                            <div class="match-bar"><div class="match-fill" style="width:<?= $score ?>%"></div></div>
-                            <span class="match-pct"><?= $score ?>%</span>
-                        </div>
-                        <div class="career-actions">
-                            <?php if ($id): ?>
-                                <a href="../career_details.php?id=<?= $id ?>" class="btn-sm">View Details</a>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        <?php else: ?>
-            <div class="empty-state">
-                <div class="icon">🎯</div>
-                <p>No recommendations yet.<br><a href="../profile.php">Complete your profile</a> or <a href="../assessments.php">take an assessment</a> to get matched.</p>
-            </div>
-        <?php endif; ?>
+    <div class="section"><div class="section-title">Quick Actions</div><div class="info-grid">
+        <div class="info-card"><h4>🧭 Explore Careers</h4><p>Browse all career paths and see your matches.</p><a href="../careers.php" class="btn-sm">Browse Careers</a></div>
+        <div class="info-card"><h4>📅 Book a Counsellor</h4><p>Schedule a session for personalised guidance.</p><a href="../appointments.php" class="btn-sm">Book Appointment</a></div>
+        <div class="info-card"><h4>📋 Take an Assessment</h4><p>Improve your match accuracy and discover strengths.</p><a href="../assessments.php" class="btn-sm">Start Assessment</a></div>
+    </div></div>
+    <div class="section"><div class="section-title">Career Recommendations for You</div>
+    <?php if (!empty($recommendations)): ?>
+        <div class="career-grid"><?php foreach ($recommendations as $rec): $career = $rec['career']; $score = min(100, max(0, (int)$rec['score'])); $name = htmlspecialchars($career['career_name'] ?? 'Unknown'); $cat = htmlspecialchars($career['category'] ?? ''); $edu = htmlspecialchars($career['education_required'] ?? 'Various'); $id = (int)($career['id'] ?? 0); ?>
+            <div class="career-card"><div class="career-name">🏢 <?= $name ?></div><?php if ($cat): ?><div class="career-category"><?= $cat ?></div><?php endif; ?><div class="career-category"><?= $edu ?></div><div class="match-bar-wrap"><div class="match-bar"><div class="match-fill" style="width:<?= $score ?>%"></div></div><span class="match-pct"><?= $score ?>%</span></div><?php if ($id): ?><a href="../career_details.php?id=<?= $id ?>" class="btn-sm">View Details</a><?php endif; ?></div>
+        <?php endforeach; ?></div>
+    <?php else: ?>
+        <div class="empty-state"><div class="icon">🎯</div><p>No recommendations yet.<br><a href="../profile.php">Complete your profile</a> or <a href="../assessments.php">take an assessment</a> to get matched.</p></div>
+    <?php endif; ?>
     </div>
 </main>
 </body>

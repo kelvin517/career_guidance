@@ -5,19 +5,21 @@ ini_set('log_errors',             1);
 error_reporting(E_ALL);
 /**
  * Smart Learning Career Guidance System
- * register.php — Multi-role registration
+ * register.php — Multi-role registration (student, counselor, admin, teacher)
  *
  * Fixes applied vs. original:
  * ✓ Removed require functions.php (caused redirect/sanitize redeclaration fatal)
- * ✓ Fixed log_activity($user_id, ...) — no longer passes PDO (was the TypeError
- *   that triggered the catch block and showed "Registration failed")
- * ✓ Email uniqueness check now uses a prepared statement (was SQL-injectable)
+ * ✓ Fixed log_activity($user_id, ...) — no longer passes PDO
+ * ✓ Email uniqueness check now uses a prepared statement
  * ✓ Transaction uses procedural mysqli_* consistently with config.php
  * ✓ display_errors off in config.php (Error 500 details no longer leak)
  * ✓ Admin secret moved to config constant / env var
+ * ✓ Added TEACHER role with its own profile fields
  */
 
 require_once 'includes/config.php';
+// Ensure db_error variable exists (might not be set if connection succeeded)
+$db_error = $db_error ?? null;
 // ⚠ Do NOT also require functions.php here — config.php already defines
 //   sanitize_input, redirect, generate_csrf_token, verify_csrf_token, log_activity
 
@@ -27,7 +29,7 @@ if (isLoggedIn()) {
 }
 
 // ── Config ────────────────────────────────────────────────────────────────
-$allowed_roles    = ['student', 'counselor', 'admin'];
+$allowed_roles    = ['student', 'counselor', 'admin', 'teacher'];
 $admin_secret_key = getenv('ADMIN_REG_KEY') ?: 'ADMIN123'; // override via env var
 
 $errors  = [];
@@ -54,6 +56,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $course_of_study  = sanitize_input($_POST['course_of_study']  ?? '');
         $specialization   = sanitize_input($_POST['specialization']   ?? '');
         $years_experience = max(0, min(50, (int)($_POST['years_experience'] ?? 0)));
+        
+        // Teacher fields
+        $subject_specialization = sanitize_input($_POST['subject_specialization'] ?? '');
+        $qualification          = sanitize_input($_POST['qualification']          ?? '');
 
         // 3. Validate
         if (empty($full_name) || strlen($full_name) < 2)
@@ -95,6 +101,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($role === 'counselor' && empty($specialization))
             $errors['specialization'] = 'Specialization is required.';
 
+        if ($role === 'teacher' && empty($subject_specialization))
+            $errors['subject_specialization'] = 'Subject specialization is required.';
+        if ($role === 'teacher' && empty($qualification))
+            $errors['qualification'] = 'Qualification is required.';
+
         // 4. Persist if valid
         if (empty($errors)) {
 
@@ -133,10 +144,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         mysqli_stmt_bind_param($stmt2, 'isi', $user_id, $specialization, $years_experience);
                         mysqli_stmt_execute($stmt2);
                         mysqli_stmt_close($stmt2);
+                        
+                    } elseif ($role === 'teacher') {
+                        $stmt2 = mysqli_prepare($conn,
+                            'INSERT INTO teacher_profiles (user_id, subject_specialization, qualification, created_at)
+                             VALUES (?, ?, ?, NOW())'
+                        );
+                        mysqli_stmt_bind_param($stmt2, 'iss', $user_id, $subject_specialization, $qualification);
+                        mysqli_stmt_execute($stmt2);
+                        mysqli_stmt_close($stmt2);
                     }
 
                     // ✓ Correct call — (int $user_id, string $action, string $details)
-                    //   No PDO argument — matches config.php definition exactly
                     log_activity($user_id, 'register', "New {$role} registered");
 
                     mysqli_commit($conn);
@@ -309,7 +328,7 @@ $csrf_token = generate_csrf_token();
 <div class="page-body">
 
     <h1 class="page-heading">Create your account</h1>
-    <p class="page-sub">Join thousands of students and counsellors shaping their futures.</p>
+    <p class="page-sub">Join thousands of students, teachers, and counsellors shaping their futures.</p>
 
     <!-- DB unavailable banner -->
     <?php if ($db_error): ?>
@@ -334,7 +353,14 @@ $csrf_token = generate_csrf_token();
             <div class="section-title">I am a</div>
             <div class="role-grid">
 
-                <?php foreach (['student' => ['🎓','Student'], 'counselor' => ['💼','Counsellor']] as $val => [$icon, $name]): ?>
+                <?php 
+                $roles = [
+                    'student'   => ['🎓', 'Student'],
+                    'teacher'   => ['📚', 'Teacher'],
+                    'counselor' => ['💼', 'Counsellor']
+                ];
+                foreach ($roles as $val => [$icon, $name]): 
+                ?>
                     <input class="role-option" type="radio" name="role"
                            id="role-<?= $val ?>" value="<?= $val ?>"
                            onchange="toggleRoleFields()"
@@ -422,9 +448,52 @@ $csrf_token = generate_csrf_token();
                 </div>
             </div>
 
+            <!-- ── Teacher Fields ─────────────────────────────────────── -->
+            <div id="teacherFields" class="role-fields <?= (($_POST['role'] ?? '') === 'teacher') ? 'visible' : '' ?>">
+                <div class="section-title">Professional Information (Teacher)</div>
+                <div style="margin-bottom:16px;">
+                    <label for="subject_specialization">Subject Specialization *</label>
+                    <select id="subject_specialization" name="subject_specialization"
+                            class="form-control <?= !empty($errors['subject_specialization']) ? 'is-invalid' : '' ?>">
+                        <option value="">— Select subject —</option>
+                        <?php 
+                        $subjects = [
+                            'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Computer Science',
+                            'English', 'Kiswahili', 'History', 'Geography', 'Business Studies',
+                            'Agriculture', 'Home Science', 'Religious Education', 'Art & Design', 'Music'
+                        ];
+                        foreach ($subjects as $subj):
+                            $sel = (($_POST['subject_specialization'] ?? '') === $subj) ? 'selected' : '';
+                        ?>
+                            <option value="<?= htmlspecialchars($subj) ?>" <?= $sel ?>><?= htmlspecialchars($subj) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php if (!empty($errors['subject_specialization'])): ?>
+                        <div class="field-error">⚠ <?= htmlspecialchars($errors['subject_specialization']) ?></div>
+                    <?php endif; ?>
+                </div>
+                <div>
+                    <label for="qualification">Qualification *</label>
+                    <select id="qualification" name="qualification"
+                            class="form-control <?= !empty($errors['qualification']) ? 'is-invalid' : '' ?>">
+                        <option value="">— Select qualification —</option>
+                        <?php 
+                        $quals = ['Diploma', 'Bachelor\'s Degree', 'Master\'s Degree', 'PhD', 'PGDE'];
+                        foreach ($quals as $q):
+                            $sel = (($_POST['qualification'] ?? '') === $q) ? 'selected' : '';
+                        ?>
+                            <option value="<?= htmlspecialchars($q) ?>" <?= $sel ?>><?= htmlspecialchars($q) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php if (!empty($errors['qualification'])): ?>
+                        <div class="field-error">⚠ <?= htmlspecialchars($errors['qualification']) ?></div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
             <!-- ── Counselor Fields ───────────────────────────────────── -->
             <div id="counselorFields" class="role-fields <?= (($_POST['role'] ?? '') === 'counselor') ? 'visible' : '' ?>">
-                <div class="section-title">Professional Information</div>
+                <div class="section-title">Professional Information (Counselor)</div>
                 <div class="row row-2">
                     <div>
                         <label for="specialization">Specialization *</label>
@@ -521,6 +590,7 @@ $csrf_token = generate_csrf_token();
 function toggleRoleFields() {
     const role = document.querySelector('input[name="role"]:checked')?.value ?? '';
     document.getElementById('studentFields').classList.toggle('visible',  role === 'student');
+    document.getElementById('teacherFields').classList.toggle('visible',  role === 'teacher');
     document.getElementById('counselorFields').classList.toggle('visible', role === 'counselor');
     document.getElementById('adminFields').classList.toggle('visible',    role === 'admin');
 }
@@ -541,7 +611,7 @@ document.getElementById('password').addEventListener('input', function () {
 });
 
 // ── Prevent double-submit ────────────────────────────────────────────────
-document.getElementById('registerForm').addEventListener('submit', function () {
+document.getElementById('registerForm').addEventListener('submit', function (event) {
     const btn  = document.getElementById('submitBtn');
     const terms = document.getElementById('agree_terms');
     if (!terms.checked) {
