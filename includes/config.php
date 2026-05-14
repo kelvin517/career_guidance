@@ -1,20 +1,30 @@
 <?php
 /**
  * Smart Learning Career Guidance System
- * includes/config.php — Database connection & site-wide configuration
+ * includes/config.php — Database, session, and all shared helpers
  *
- * Error-500 fixes applied
- * ───────────────────────
- *  ✓ Replaced die() with graceful error handling
- *  ✓ Removed duplicate session_start() (handled once here, safely)
- *  ✓ Removed redirect() / sanitize() that clashed with functions.php
- *  ✓ Added mysqli error mode so warnings surface in logs, not the browser
- *  ✓ Wrapped connection in try/catch for clean failure messaging
+ * ── This file is the single source of truth for: ──────────────────────────
+ *   • DB connection (mysqli, procedural style)
+ *   • Session bootstrap
+ *   • sanitize() / sanitize_input()
+ *   • redirect() / redirect_by_role()
+ *   • isLoggedIn() / is_logged_in()
+ *   • generate_csrf_token() / verify_csrf_token() / rotate_csrf_token()
+ *   • log_activity()        ← mysqli-based, no PDO dependency
+ *   • set_flash() / get_flash_messages()
+ *   • getCareerRecommendations()
+ *
+ * ── Do NOT redefine any of the above in functions.php ─────────────────────
  */
 
-// ── Session (start once, safely) ─────────────────────────────────────────
+// ── Error reporting (disable display in production, always log) ───────────
+ini_set('display_errors',         0);
+ini_set('display_startup_errors', 0);
+ini_set('log_errors',             1);
+error_reporting(E_ALL);
+
+// ── Session (start once, securely) ───────────────────────────────────────
 if (session_status() === PHP_SESSION_NONE) {
-    // Harden the session cookie
     session_set_cookie_params([
         'lifetime' => 0,
         'path'     => '/',
@@ -25,153 +35,231 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// ── Database credentials (override via environment variables in production) ─
-define('DB_HOST',    getenv('DB_HOST')    ?: 'localhost');
-define('DB_USER',    getenv('DB_USER')    ?: 'root');
-define('DB_PASS',    getenv('DB_PASS')    ?: '');          // empty = XAMPP default
-define('DB_NAME',    getenv('DB_NAME')    ?: 'career_guidance');
+// ── Site constants (guard with defined() to prevent redeclaration errors) ─
+if (!defined('SITE_NAME'))   define('SITE_NAME',   'Smart Learning Career Guidance System');
+if (!defined('SITE_URL'))    define('SITE_URL',    rtrim(getenv('SITE_URL') ?: 'http://localhost/career_guidance', '/') . '/');
+if (!defined('APP_SECRET'))  define('APP_SECRET',  getenv('APP_SECRET') ?: 'change-this-secret-key-in-production');
+if (!defined('UPLOAD_DIR'))  define('UPLOAD_DIR',  __DIR__ . '/../uploads/');
+if (!defined('MAX_FILE_MB')) define('MAX_FILE_MB', 5);
+
+// ── Database credentials ──────────────────────────────────────────────────
+define('DB_HOST',    getenv('DB_HOST') ?: 'localhost');
+define('DB_USER',    getenv('DB_USER') ?: 'root');
+define('DB_PASS',    getenv('DB_PASS') ?: '');   // empty = XAMPP default
+define('DB_NAME',    getenv('DB_NAME') ?: 'career_guidance');
 define('DB_CHARSET', 'utf8mb4');
 
-// ── Site constants ────────────────────────────────────────────────────────
-define('SITE_NAME', 'Smart Learning Career Guidance System');
-define('SITE_URL',  rtrim(getenv('SITE_URL') ?: 'http://localhost/career_guidance', '/') . '/');
-define('APP_SECRET', getenv('APP_SECRET') ?: 'change-this-secret-key-in-production');
-
-// ── Database connection (mysqli) ──────────────────────────────────────────
-$conn = null;
+// ── Database connection ───────────────────────────────────────────────────
+$conn     = null;
 $db_error = null;
 
+// Throw exceptions on DB errors so try/catch works reliably
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
 try {
-    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); // Throw exceptions on error
-
-    $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-    $conn->set_charset(DB_CHARSET);
-
+    $conn = mysqli_connect(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+    mysqli_set_charset($conn, DB_CHARSET);
 } catch (mysqli_sql_exception $e) {
-    // Log the real error — never expose it to the browser
-    error_log('[DB ERROR] ' . $e->getMessage());
-    $db_error = 'We are experiencing a temporary issue. Please try again later.';
-    $conn = null;
+    error_log('[DB CONNECTION ERROR] ' . $e->getMessage());
+    $db_error = 'Service temporarily unavailable. Please try again later.';
+    $conn     = null;
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Sanitisation ─────────────────────────────────────────────────────────
+
 /**
- * Get the active DB connection, or null if unavailable.
- * Use this instead of the global $conn where you need a safety check.
+ * Trim, strip tags, and HTML-encode a string for safe output.
+ * Use prepared statements for DB — never embed strings directly in SQL.
  */
-function get_db(): ?mysqli {
-    global $conn;
-    return $conn;
+function sanitize(string $data): string {
+    return htmlspecialchars(strip_tags(trim($data)), ENT_QUOTES | ENT_HTML5, 'UTF-8');
 }
 
-/**
- * Execute a safe query with error handling.
- * Returns a mysqli_result on SELECT, true on INSERT/UPDATE/DELETE, or false on failure.
- *
- * @param string $sql    SQL string (use prepared statements for user data)
- * @param string $types  mysqli bind_param types string, e.g. 'sis'
- * @param mixed  ...$params  Values matching $types
- */
-function db_query(string $sql, string $types = '', mixed ...$params): mysqli_result|bool {
-    $conn = get_db();
-    if (!$conn) return false;
-
-    try {
-        if (!empty($types) && !empty($params)) {
-            $stmt = $conn->prepare($sql);
-            if (!$stmt) return false;
-            $stmt->bind_param($types, ...$params);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            return $result !== false ? $result : true;
-        }
-
-        return $conn->query($sql);
-
-    } catch (mysqli_sql_exception $e) {
-        error_log('[QUERY ERROR] ' . $e->getMessage() . ' | SQL: ' . $sql);
-        return false;
-    }
+/** Alias — files that call sanitize_input() still work. */
+function sanitize_input(string $data): string {
+    return sanitize($data);
 }
 
-// ── Helpers (only defined here — do NOT duplicate in functions.php) ───────
+// ── Authentication ────────────────────────────────────────────────────────
 
-/**
- * Check whether a user is currently authenticated.
- */
+/** Returns true when a user is authenticated. */
 function isLoggedIn(): bool {
     return !empty($_SESSION['user_id']);
 }
 
+/** Snake-case alias for isLoggedIn(). */
+function is_logged_in(): bool {
+    return isLoggedIn();
+}
+
+// ── Redirect ─────────────────────────────────────────────────────────────
+
 /**
- * Sanitize a string for use in output / DB via mysqli.
- * Prefer prepared statements for DB insertion; use this for display.
+ * Redirect to a URL (absolute) or path relative to SITE_URL, then exit.
  */
-function sanitize(string $data): string {
-    $conn = get_db();
-    $data = trim(strip_tags($data));
-    return $conn
-        ? mysqli_real_escape_string($conn, htmlspecialchars($data, ENT_QUOTES, 'UTF-8'))
-        : htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
+function redirect(string $path): never {
+    $path = preg_replace('/[\r\n]/', '', $path); // prevent header injection
+    $url  = (str_starts_with($path, 'http') || str_starts_with($path, '/'))
+              ? $path
+              : SITE_URL . ltrim($path, '/');
+    header('Location: ' . $url);
+    exit;
+}
+
+/** Send a user to their role-specific dashboard. */
+function redirect_by_role(string $role): never {
+    $map = [
+        'student'   => 'student/dashboard.php',
+        'counselor' => 'counselor/dashboard.php',
+        'admin'     => 'admin/dashboard.php',
+    ];
+    redirect($map[$role] ?? 'login.php');
+}
+
+// ── CSRF Protection ───────────────────────────────────────────────────────
+
+/**
+ * Generate (or retrieve) a CSRF token for the current session.
+ */
+function generate_csrf_token(): string {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
 }
 
 /**
- * Redirect to a path relative to SITE_URL and stop execution.
+ * Verify a CSRF token submitted with a form (timing-safe comparison).
  */
+function verify_csrf_token(string $token): bool {
+    if (empty($_SESSION['csrf_token']) || empty($token)) {
+        return false;
+    }
+    return hash_equals($_SESSION['csrf_token'], $token);
+}
 
+/** Rotate the token after a valid submission to prevent re-use. */
+function rotate_csrf_token(): void {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// ── Activity Logging ──────────────────────────────────────────────────────
 
 /**
- * Get AI-style career recommendations for a given user.
- * Scores careers by how many of the user's skills appear in the career's required skills.
+ * Record a user activity with a prepared mysqli statement.
+ *
+ * Intentionally uses only scalar parameters — no PDO dependency — so it works
+ * from every page in the project:
+ *
+ *   log_activity($user_id, 'login',    'User logged in');
+ *   log_activity($user_id, 'register', "New {$role} registered");
+ *
+ * @param int    $user_id
+ * @param string $action   Short key: 'login', 'register', 'logout', etc.
+ * @param string $details  Human-readable description (optional)
+ */
+function log_activity(int $user_id, string $action, string $details = ''): void {
+    global $conn;
+    if (!$conn) return; // DB unavailable — fail silently, don't break the page
+
+    try {
+        $stmt = mysqli_prepare(
+            $conn,
+            'INSERT INTO activity_log (user_id, action, details, ip_address, user_agent, created_at)
+             VALUES (?, ?, ?, ?, ?, NOW())'
+        );
+        if (!$stmt) return;
+
+        $ip = $_SERVER['REMOTE_ADDR']     ?? 'unknown';
+        $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255);
+
+        mysqli_stmt_bind_param($stmt, 'issss', $user_id, $action, $details, $ip, $ua);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+
+    } catch (mysqli_sql_exception $e) {
+        error_log('[ACTIVITY LOG ERROR] ' . $e->getMessage());
+        // Do not re-throw — a logging failure must never abort the main action
+    }
+}
+
+// ── Flash Messages ────────────────────────────────────────────────────────
+
+function set_flash(string $type, string $message): void {
+    $_SESSION['flash'][] = ['type' => $type, 'message' => $message];
+}
+
+function get_flash_messages(): string {
+    if (empty($_SESSION['flash'])) return '';
+    $html = '';
+    foreach ($_SESSION['flash'] as $f) {
+        $t    = htmlspecialchars($f['type'],    ENT_QUOTES, 'UTF-8');
+        $m    = htmlspecialchars($f['message'], ENT_QUOTES, 'UTF-8');
+        $html .= "<div class=\"alert alert-{$t}\" role=\"alert\">{$m}</div>\n";
+    }
+    unset($_SESSION['flash']);
+    return $html;
+}
+
+// ── Career Recommendations ────────────────────────────────────────────────
+
+/**
+ * Return up to 5 career path recommendations for a student, sorted by match %.
  *
  * @param  int   $userId
- * @return array List of up to 5 ['career' => [...], 'score' => int] entries
+ * @return array Each element: ['career' => [...row...], 'score' => int 0–100]
  */
 function getCareerRecommendations(int $userId): array {
-    $conn = get_db();
+    global $conn;
     if (!$conn) return [];
 
-    // Fetch student profile
-    $result = db_query(
-        'SELECT interests, skills FROM student_profiles WHERE user_id = ? LIMIT 1',
-        'i', $userId
-    );
+    try {
+        $stmt = mysqli_prepare($conn,
+            'SELECT skills FROM student_profiles WHERE user_id = ? LIMIT 1'
+        );
+        mysqli_stmt_bind_param($stmt, 'i', $userId);
+        mysqli_stmt_execute($stmt);
+        $result  = mysqli_stmt_get_result($stmt);
+        $profile = mysqli_fetch_assoc($result);
+        mysqli_stmt_close($stmt);
 
-    if (!$result || !($profile = mysqli_fetch_assoc($result))) {
-        return [];
-    }
+        if (!$profile || empty($profile['skills'])) return [];
 
-    $user_skills = array_filter(
-        array_map('trim', explode(',', strtolower($profile['skills'] ?? '')))
-    );
+        $user_skills = array_filter(
+            array_map('trim', explode(',', strtolower($profile['skills'])))
+        );
+        if (empty($user_skills)) return [];
 
-    if (empty($user_skills)) return [];
+        $careers_result = mysqli_query($conn, 'SELECT * FROM career_paths');
+        if (!$careers_result) return [];
 
-    // Fetch all career paths
-    $careers_result = db_query('SELECT * FROM career_paths');
-    if (!$careers_result) return [];
-
-    $recommendations = [];
-
-    while ($career = mysqli_fetch_assoc($careers_result)) {
-        $career_skills_str = strtolower($career['required_skills'] ?? '');
-        $match_count = 0;
-
-        foreach ($user_skills as $skill) {
-            if ($skill !== '' && str_contains($career_skills_str, $skill)) {
-                $match_count++;
+        $recommendations = [];
+        while ($career = mysqli_fetch_assoc($careers_result)) {
+            $career_skills_str = strtolower($career['required_skills'] ?? '');
+            $match_count = 0;
+            foreach ($user_skills as $skill) {
+                if ($skill !== '' && str_contains($career_skills_str, $skill)) {
+                    $match_count++;
+                }
+            }
+            if ($match_count > 0) {
+                $recommendations[] = [
+                    'career' => $career,
+                    'score'  => min($match_count * 20, 100),
+                ];
             }
         }
 
-        if ($match_count > 0) {
-            $recommendations[] = [
-                'career' => $career,
-                'score'  => min($match_count * 20, 100),
-            ];
-        }
+        usort($recommendations, fn($a, $b) => $b['score'] - $a['score']);
+        return array_slice($recommendations, 0, 5);
+
+    } catch (mysqli_sql_exception $e) {
+        error_log('[RECOMMENDATIONS ERROR] ' . $e->getMessage());
+        return [];
     }
-
-    // Sort descending by score
-    usort($recommendations, fn($a, $b) => $b['score'] - $a['score']);
-
-    return array_slice($recommendations, 0, 5);
 }
