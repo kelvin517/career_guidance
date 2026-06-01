@@ -14,7 +14,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['full_name'] = $row['full_name'];
             $_SESSION['role'] = $row['role'];
             log_activity($row['id'], 'login', 'User logged in');
-            redirect_by_role($row['role']);
+            
+
+
+            // Role-based redirection
+            switch ($row['role']) {
+                case 'student':
+                    header("Location: views/dashboard/student_dashboard.php");
+                    break;
+                case 'teacher':
+                    header("Location: views/dashboard/teacher_dashboard.php");
+                    break;
+                case 'counselor':
+                    header("Location: views/dashboard/counselor_dashboard.php");
+                    break;
+                case 'admin':
+                    header("Location: views/dashboard/admin_dashboard.php");
+                    break;
+                default:
+                    header("Location: dashboard.php");
+                    break;
+            }
+            exit();
         } else {
             $error = 'Invalid email or password.';
         }
@@ -57,7 +78,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 0;
         }
 
-        /* ── Page grid ── */
         .auth-page {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -65,7 +85,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             min-height: 100vh;
         }
 
-        /* ── Left panel ── */
         .panel-left {
             background: var(--ink);
             display: flex;
@@ -126,7 +145,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             background: var(--accent); flex-shrink: 0;
         }
 
-        /* ── Right panel ── */
         .panel-right {
             background: var(--white);
             display: flex; flex-direction: column;
@@ -153,7 +171,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: .88rem; color: var(--ink-faint); margin-bottom: 36px;
         }
 
-        /* Override Bootstrap alert */
         .alert-danger {
             background: #fdf0ef !important;
             color: var(--danger) !important;
@@ -165,8 +182,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         .alert-danger::before { content: '⚠'; flex-shrink: 0; }
 
-        /* Override Bootstrap labels */
-        label.form-label, label {
+        label {
             display: block;
             font-size: .73rem !important;
             font-weight: 600 !important;
@@ -176,7 +192,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             margin-bottom: 7px !important;
         }
 
-        /* Override Bootstrap form-control */
         .form-control {
             padding: 12px 15px !important;
             border: 1.5px solid var(--border) !important;
@@ -188,14 +203,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: none !important;
             transition: border-color .2s, box-shadow .2s, background .2s !important;
         }
-        .form-control::placeholder { color: var(--ink-faint) !important; }
         .form-control:focus {
             border-color: var(--accent) !important;
             box-shadow: 0 0 0 3px rgba(200,98,42,.12) !important;
             background: #fff !important;
         }
 
-        /* Override Bootstrap btn-primary */
         .btn-primary {
             background: var(--accent) !important;
             border: none !important;
@@ -214,10 +227,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         .btn-primary:active { transform: scale(.985) !important; }
 
-        /* Override Bootstrap card */
-        .card { display: none; } /* unused — layout is handled by auth-page grid */
-
-        /* Footer link */
         .text-center a {
             color: var(--accent) !important;
             font-weight: 600;
@@ -226,10 +235,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .text-center a:hover { text-decoration: underline; }
         .text-center { color: var(--ink-faint); font-size: .85rem; }
 
-        /* mb-3 spacing */
         .mb-3 { margin-bottom: 20px !important; }
 
-        /* Responsive */
         @media (max-width: 768px) {
             .auth-page { grid-template-columns: 1fr; }
             .panel-left { display: none; }
@@ -237,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     </style>
 </head>
-<body class="bg-light">
+<body>
 
 <div class="auth-page">
 
@@ -265,39 +272,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <!-- Right form panel -->
     <div class="panel-right">
         <div class="form-wrap">
-
             <h1 class="form-heading">Welcome back</h1>
             <p class="form-sub">Sign in to continue your journey</p>
 
-            <!-- Original container markup preserved exactly, just hidden via CSS above -->
-            <div class="container mt-5" style="max-width: 500px; margin: 0 !important; padding: 0 !important;">
-                <div class="card shadow" style="display:block; border:none; border-radius:0; box-shadow:none !important;">
-                    <div class="card-body p-4" style="padding:0 !important;">
+            <?php if ($error): ?>
+                <div class="alert alert-danger"><?= htmlspecialchars($error) ?></div>
+            <?php endif; ?>
 
-                        <h3 class="text-center mb-4" style="display:none;">Login</h3>
-
-                        <?php if ($error): ?>
-                            <div class="alert alert-danger"><?= htmlspecialchars($error) ?></div>
-                        <?php endif; ?>
-
-                        <form method="POST">
-                            <div class="mb-3">
-                                <label>Email</label>
-                                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
-                            </div>
-                            <div class="mb-3">
-                                <label>Password</label>
-                                <input type="password" name="password" class="form-control" placeholder="Enter your password" required>
-                            </div>
-                            <button type="submit" class="btn btn-primary w-100">Login</button>
-                        </form>
-
-                        <p class="text-center mt-3">No account? <a href="register.php">Register</a></p>
-
-                    </div>
+            <form method="POST">
+                <div class="mb-3">
+                    <label>Email</label>
+                    <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
                 </div>
-            </div>
+                <div class="mb-3">
+                    <label>Password</label>
+                    <input type="password" name="password" class="form-control" placeholder="Enter your password" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Login</button>
+            </form>
 
+            <p class="text-center mt-3">No account? <a href="register.php">Register</a></p>
         </div>
     </div>
 
